@@ -196,8 +196,13 @@ final class RecorderViewModel {
 
             setState(.translating)
             do {
-                // Preferred path: the LLM translates the Serbian source directly.
-                let english = try await ollama.translate(serbian)
+                // Preferred path: the LLM translates the Serbian source directly,
+                // honoring the user's tone + glossary preferences.
+                let english = try await ollama.translate(
+                    serbian,
+                    tone: TranslationPreferences.tone,
+                    glossary: TranslationPreferences.glossary
+                )
                 finish(english: english, source: .ollama, hint: nil)
             } catch {
                 // Ollama unavailable — fall back to Whisper's own translate task.
