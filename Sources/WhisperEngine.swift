@@ -12,6 +12,12 @@ actor WhisperEngine {
 
     var isLoaded: Bool { pipe != nil }
 
+    /// Live progress (0...1) of the in-flight transcription, from WhisperKit's own per-chunk
+    /// `Progress` (it resets the progress at the start of each `transcribe`, so this reflects
+    /// only the current call). 0 when idle or just started. Polled by the view model to show
+    /// a real percentage + time estimate on long recordings.
+    var transcriptionProgress: Double { pipe?.progress.fractionCompleted ?? 0 }
+
     /// Locates the model (downloading it from Hugging Face on first run, ~2.9 GB for
     /// `openai_whisper-large-v3`) and prewarms it. `onDownloadProgress` reports the
     /// download fraction (0–1); it only ticks on first run — a cached model resolves

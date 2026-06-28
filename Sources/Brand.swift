@@ -28,6 +28,12 @@ enum Brand {
         try directory(in: .cachesDirectory, subpath: "Updates")
     }
 
+    /// `~/Library/Application Support/Sapat/Recordings` — each capture is written here so a
+    /// recording survives a failed transcription/refinement and can be retried.
+    static func recordingsDirectory() throws -> URL {
+        try directory(in: .applicationSupportDirectory, subpath: "Recordings")
+    }
+
     /// Scratch WAV the recorder writes to before transcription.
     static var temporaryRecordingURL: URL {
         FileManager.default.temporaryDirectory

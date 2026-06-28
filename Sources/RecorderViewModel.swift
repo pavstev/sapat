@@ -86,7 +86,17 @@ final class RecorderViewModel {
     private var recordingURL: URL?
     private var meterTimer: Timer?
     private var processingTimer: Timer?
-    private var processingElapsed = 0 // seconds, drives the "Transcribing · m:ss" detail
+    private var processingElapsed = 0 // seconds, drives the elapsed clock in the detail line
+    private var transcriptionFraction = 0.0 // WhisperKit's live progress, for the % + estimate
+
+    /// The audio behind the current job, kept so a failed run can be retried without
+    /// re-recording. A live recording is durably saved (and deleted on success); an import
+    /// points at the user's own file.
+    private enum PendingSource {
+        case recording(URL) // our durable WAV — clean up on success
+        case imported(URL)  // the user's file — never delete
+    }
+    private var pending: PendingSource?
     private var copiedTask: Task<Void, Never>?
     private var noticeTask: Task<Void, Never>?
 
@@ -111,6 +121,7 @@ final class RecorderViewModel {
             }
             setState(.idle)
             warmUpLMStudio()
+            pruneOldRecordings(keeping: 30)
         } catch {
             setState(.error(AppError(
                 message: "Couldn't load the speech model. \(error.localizedDescription)",
@@ -162,6 +173,7 @@ final class RecorderViewModel {
         guard canImport else { return }
         clearResults()
         importedFileName = url.lastPathComponent
+        pending = .imported(url)
         setState(.transcribing)
         processingDetail = "Preparing \(url.lastPathComponent)…"
         Task { await runImport(url: url) }
@@ -200,12 +212,22 @@ final class RecorderViewModel {
         flashNotice("Recording canceled")
     }
 
-    /// "Retry" after an error: re-refine the existing transcript when we have one (an LM
-    /// Studio hiccup), otherwise re-run the launch preparation.
+    /// "Retry" after an error, cheapest viable path first: re-refine an existing transcript
+    /// (LM Studio hiccup), else re-transcribe from the saved audio (transcription failed),
+    /// else re-run launch preparation.
     func retryAfterError() {
         if !serbianText.isEmpty {
             Task { await refine() }
-        } else {
+            return
+        }
+        switch pending {
+        case .recording(let url) where FileManager.default.fileExists(atPath: url.path):
+            Task { await transcribeAndRefine(audioPath: url.path) }
+        case .imported(let url):
+            importedFileName = url.lastPathComponent
+            setState(.transcribing)
+            Task { await runImport(url: url) }
+        default:
             Task { await prepare() }
         }
     }
@@ -245,7 +267,9 @@ final class RecorderViewModel {
     private func startRecording() {
         clearResults()
 
-        let url = Brand.temporaryRecordingURL
+        // Save to a durable, uniquely-named file so the recording survives a failed
+        // transcription/refinement and can be retried (deleted once it succeeds).
+        let url = Self.newRecordingURL()
         try? FileManager.default.removeItem(at: url)
 
         // 16 kHz mono 16-bit PCM WAV — exactly what WhisperKit wants. AVAudioRecorder
@@ -289,10 +313,13 @@ final class RecorderViewModel {
         recordingDuration = 0
 
         guard let url = recordingURL, duration > 0.3 else {
+            if let url = recordingURL { try? FileManager.default.removeItem(at: url) } // nothing worth keeping
+            recordingURL = nil
             flashNotice("No speech detected — try again")
             setState(.idle)
             return
         }
+        pending = .recording(url)
         Task { await transcribeAndRefine(audioPath: url.path) }
     }
 
@@ -366,12 +393,14 @@ final class RecorderViewModel {
         let client = llm
         let manager = lmStudio
         let modelKey = TranslationPreferences.model
-        let (phases, continuation) = AsyncStream<LMStudioManager.Phase>.makeStream()
+        // bufferingNewest(1): keep only the latest progress line so fast download updates
+        // (many per second) never flood the UI — we always show the most recent.
+        let (statuses, continuation) = AsyncStream<String>.makeStream(bufferingPolicy: .bufferingNewest(1))
 
         let task = Task.detached {
             defer { continuation.finish() }
-            try await manager.ensureReady(modelKey: modelKey, client: client) { phase in
-                continuation.yield(phase)
+            try await manager.ensureReady(modelKey: modelKey, client: client) { status in
+                continuation.yield(status)
             }
         }
         readinessTask = task
@@ -382,7 +411,7 @@ final class RecorderViewModel {
             setLMStudioStatus(nil)
         }
 
-        for await phase in phases { setLMStudioStatus(phase.message) }
+        for await status in statuses { setLMStudioStatus(status) }
         try await task.value // re-throws any setup failure to the caller
     }
 
@@ -399,6 +428,9 @@ final class RecorderViewModel {
         flashCopied()
         setState(.done)
         saveToHistory(serbian: serbianText, english: cleaned)
+        // Succeeded — the durable recording is no longer needed for retry.
+        if case .recording(let url)? = pending { try? FileManager.default.removeItem(at: url) }
+        pending = nil
     }
 
     private func saveToHistory(serbian: String, english: String) {
@@ -449,6 +481,8 @@ final class RecorderViewModel {
         notice = nil
         processingDetail = nil
         importedFileName = nil
+        transcriptionFraction = 0
+        pending = nil
     }
 
     private func setState(_ newState: AppState) {
@@ -504,14 +538,19 @@ final class RecorderViewModel {
 
     private func startProcessingTimer() {
         processingElapsed = 0
+        transcriptionFraction = 0
         processingDetail = transcriptionDetail()
         processingTimer?.invalidate()
-        // Fires on the main run loop; we're on the main actor, so update directly.
+        // Fires on the main run loop; we're on the main actor.
         processingTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.processingElapsed += 1
-                self.processingDetail = self.transcriptionDetail()
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.transcriptionFraction = await self.whisper.transcriptionProgress
+                    self.processingDetail = self.transcriptionDetail()
+                }
             }
         }
     }
@@ -521,10 +560,63 @@ final class RecorderViewModel {
         processingTimer = nil
     }
 
+    /// Detail under the status line while transcribing: a real percentage + time estimate
+    /// once WhisperKit reports progress, otherwise an elapsed clock. Prefixed with the file
+    /// name for imports.
     private func transcriptionDetail() -> String {
-        let clock = String(format: "%d:%02d", processingElapsed / 60, processingElapsed % 60)
-        if let name = importedFileName { return "\(name) · \(clock)" }
-        return clock
+        let prefix = importedFileName.map { "\($0) · " } ?? ""
+        if transcriptionFraction > 0.01 {
+            let pct = Int((transcriptionFraction * 100).rounded())
+            if let remaining = estimatedRemaining() { return "\(prefix)\(pct)% · ~\(remaining) left" }
+            return "\(prefix)\(pct)%"
+        }
+        return "\(prefix)\(clockString(processingElapsed))"
+    }
+
+    /// Projects time-remaining from how long the elapsed fraction took. Needs a couple of
+    /// seconds of signal first so the first estimate isn't wild.
+    private func estimatedRemaining() -> String? {
+        guard transcriptionFraction > 0.02, processingElapsed >= 2 else { return nil }
+        let projectedTotal = Double(processingElapsed) / transcriptionFraction
+        let remaining = Int((projectedTotal - Double(processingElapsed)).rounded())
+        guard remaining > 0 else { return nil }
+        return clockString(remaining)
+    }
+
+    private func clockString(_ seconds: Int) -> String {
+        String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+
+    // MARK: Durable recording files (so a failed run can be retried)
+
+    private static func newRecordingURL() -> URL {
+        let name = "rec-\(timestamp())-\(UUID().uuidString.prefix(6)).wav"
+        if let dir = try? Brand.recordingsDirectory() { return dir.appendingPathComponent(name) }
+        return Brand.temporaryRecordingURL
+    }
+
+    private static func timestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter.string(from: Date())
+    }
+
+    /// Bound the saved-recordings folder so failed-and-forgotten captures don't pile up
+    /// forever, while keeping the most recent ones around to retry.
+    private func pruneOldRecordings(keeping limit: Int) {
+        guard let dir = try? Brand.recordingsDirectory() else { return }
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        let wavs = files.filter { $0.pathExtension == "wav" }
+        guard wavs.count > limit else { return }
+        let byNewest = wavs.sorted {
+            let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return lhs > rhs
+        }
+        for url in byNewest.dropFirst(limit) { try? fm.removeItem(at: url) }
     }
 
     // MARK: Clipboard + confirmations
