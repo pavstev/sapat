@@ -54,20 +54,44 @@ struct LMStudioClient {
         return response is HTTPURLResponse
     }
 
-    /// Whether `model` is loaded / merely downloaded / absent, per the native API.
+    /// Whether a model matching `modelKey` is loaded / merely downloaded / absent.
+    /// Matching is normalized (see `modelsMatch`) because `lms get qwen/qwen3-8b` lands a
+    /// download whose reported id is something like `lmstudio-community/Qwen3-8B-MLX-4bit`.
     func presence(of modelKey: String) async -> ModelPresence {
         guard let models = await fetchModels() else { return .serverUnreachable }
-        guard let entry = models.first(where: { $0.id == modelKey }) else { return .absent }
-        return entry.state == "loaded" ? .loaded : .downloadedNotLoaded
+        let matching = models.filter { Self.modelsMatch($0.id, modelKey) }
+        guard !matching.isEmpty else { return .absent }
+        return matching.contains { $0.state == "loaded" } ? .loaded : .downloadedNotLoaded
     }
 
-    /// The context window of *our* loaded model, or nil — sizing chunks to a different
-    /// model's context would be meaningless since the request targets `model`.
-    func loadedContextLength() async -> Int? {
-        guard let models = await fetchModels(),
-              let loaded = models.first(where: { $0.id == model && $0.state == "loaded" })
-        else { return nil }
-        return loaded.loadedContextLength ?? loaded.maxContextLength
+    /// The loaded model that best matches the configured `model`, with its **actual** API id
+    /// (sent in the chat request) and context window (sizes chunking). Prefers an exact id,
+    /// then a normalized match, then any loaded model.
+    struct ResolvedModel { let id: String; let context: Int }
+
+    func resolveModel() async -> ResolvedModel? {
+        guard let models = await fetchModels() else { return nil }
+        let loaded = models.filter { $0.state == "loaded" }
+        let pick = loaded.first { $0.id == model }
+            ?? loaded.first { Self.modelsMatch($0.id, model) }
+            ?? loaded.first
+        guard let pick else { return nil }
+        let context = pick.loadedContextLength ?? pick.maxContextLength ?? Self.fallbackContextLength
+        return ResolvedModel(id: pick.id, context: context)
+    }
+
+    /// Loose model-id comparison: reduce each id to its last path component, lowercased,
+    /// alphanumerics only, then match if one contains the other. So `qwen/qwen3-8b` matches
+    /// `lmstudio-community/Qwen3-8B-MLX-4bit` (qwen38b ⊂ qwen38bmlx4bit) but not `qwen3-80b`.
+    static func modelsMatch(_ a: String, _ b: String) -> Bool {
+        let na = normalizedModelKey(a), nb = normalizedModelKey(b)
+        guard !na.isEmpty, !nb.isEmpty else { return false }
+        return na.contains(nb) || nb.contains(na)
+    }
+
+    static func normalizedModelKey(_ id: String) -> String {
+        let leaf = id.split(separator: "/").last.map(String.init) ?? id
+        return leaf.lowercased().filter { $0.isLetter || $0.isNumber }
     }
 
     private func fetchModels() async -> [ModelInfo]? {
@@ -85,8 +109,10 @@ struct LMStudioClient {
     /// Refines the full Serbian transcript into one English statement, chunking when it
     /// won't fit the loaded context so nothing is dropped. Throws `LMStudioError` on any
     /// connectivity/model problem — the caller surfaces it (no silent fallback).
-    func refine(_ serbian: String, tone: Tone = .polished, glossary: String = "") async throws -> String {
-        let context = await loadedContextLength() ?? Self.fallbackContextLength
+    func refine(_ serbian: String, tone: Tone = .technical, glossary: String = "", onProgress: (@Sendable (String) -> Void)? = nil) async throws -> String {
+        let resolved = await resolveModel()
+        let context = resolved?.context ?? Self.fallbackContextLength
+        let chatModel = resolved?.id ?? model // actual loaded id, so the request never 404s on naming
         let budget = Double(context) * contextSafety
         let system = systemPrompt(tone: tone, glossary: glossary)
         let systemTokens = TranscriptChunker.estimateTokens(system)
@@ -94,7 +120,7 @@ struct LMStudioClient {
 
         // Single pass when system + transcript + room for an equal-size output fits.
         if Double(systemTokens + transcriptTokens * 2 + 32) <= budget {
-            return try await complete(system: system, user: serbian, context: context)
+            return try await complete(system: system, user: serbian, context: context, modelID: chatModel)
         }
 
         // Split: reserve half the remaining room for the model's output of each chunk.
@@ -105,14 +131,16 @@ struct LMStudioClient {
 
         var parts: [String] = []
         for (index, chunk) in chunks.enumerated() {
+            onProgress?("Section \(index + 1) of \(chunks.count)…")
             let refined = try await complete(system: chunkSystemPrompt(tone: tone, glossary: glossary),
-                                             user: chunk, context: context)
+                                             user: chunk, context: context, modelID: chatModel)
             Log.llm.info("Refined chunk \(index + 1, privacy: .public)/\(chunks.count, privacy: .public)")
             parts.append(refined)
         }
 
         guard parts.count > 1 else { return parts.first ?? "" }
-        return try await merge(parts, tone: tone, glossary: glossary, context: context)
+        onProgress?("Merging \(parts.count) sections…")
+        return try await merge(parts, tone: tone, glossary: glossary, context: context, modelID: chatModel)
     }
 
     // MARK: - Single chat completion
@@ -120,7 +148,7 @@ struct LMStudioClient {
     /// One chat-completions round-trip. Sets an explicit `max_tokens` from the context
     /// budget and inspects `finish_reason` so a truncated *output* is at least logged
     /// rather than silently shipped.
-    private func complete(system: String, user: String, context: Int) async throws -> String {
+    private func complete(system: String, user: String, context: Int, modelID: String) async throws -> String {
         let promptTokens = TranscriptChunker.estimateTokens(system) + TranscriptChunker.estimateTokens(user)
         // Generation room left under the safety budget. Callers (refine/merge) size prompts
         // so this stays comfortably positive; the small floor only guards a bad estimate.
@@ -132,7 +160,7 @@ struct LMStudioClient {
         request.timeoutInterval = timeout
 
         let payload = ChatRequest(
-            model: model,
+            model: modelID,
             messages: [Message(role: "system", content: system), Message(role: "user", content: user)],
             temperature: temperature,
             maxTokens: maxTokens,
@@ -182,7 +210,7 @@ struct LMStudioClient {
     /// span chunk boundaries. When the parts won't all fit one call, it merges them in
     /// groups and folds the group results together (a small map-reduce) so the seam de-dup
     /// is preserved instead of degrading to a plain concatenation.
-    private func merge(_ parts: [String], tone: Tone, glossary: String, context: Int) async throws -> String {
+    private func merge(_ parts: [String], tone: Tone, glossary: String, context: Int, modelID: String) async throws -> String {
         guard parts.count > 1 else { return parts.first ?? "" }
         let system = mergeSystemPrompt(tone: tone, glossary: glossary)
         let systemTokens = TranscriptChunker.estimateTokens(system)
@@ -219,12 +247,12 @@ struct LMStudioClient {
             let joined = group.enumerated()
                 .map { "Part \($0.offset + 1):\n\($0.element)" }
                 .joined(separator: "\n\n")
-            merged.append(try await complete(system: system, user: joined, context: context))
+            merged.append(try await complete(system: system, user: joined, context: context, modelID: modelID))
         }
 
         return merged.count == 1
             ? merged[0]
-            : try await merge(merged, tone: tone, glossary: glossary, context: context)
+            : try await merge(merged, tone: tone, glossary: glossary, context: context, modelID: modelID)
     }
 
     // MARK: - Prompts

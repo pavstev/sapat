@@ -4,7 +4,7 @@ import SwiftUI
 /// the global shortcut (⌥⇧Space), and a little about text. All persist via @AppStorage
 /// using the same keys `TranslationPreferences` reads.
 struct SettingsView: View {
-    @AppStorage(TranslationPreferences.toneKey) private var toneRaw = Tone.polished.rawValue
+    @AppStorage(TranslationPreferences.toneKey) private var toneRaw = Tone.technical.rawValue
     @AppStorage(TranslationPreferences.glossaryKey) private var glossary = ""
     @AppStorage(TranslationPreferences.modelKey) private var model = ""
 

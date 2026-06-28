@@ -43,7 +43,9 @@ any that leak). Tone presets and a glossary tune the result.
 ## Features
 
 - **On-device transcription** — WhisperKit `large-v3` with VAD silence handling, tuned for long, pause-heavy monologues (5–10 min).
+- **Import any recording** — pick or drag in an audio **or video** file of any length; the audio track is extracted, silence is skipped, and it's transcribed + refined like a live take, with elapsed-time and per-section progress.
 - **Local refinement** — LM Studio (`qwen/qwen3-8b`, MLX) deduplicates and formalizes into concise English without fabricating; output-only.
+- **Technical by default** — the default tone produces precise, professional engineering English (configurable in Settings).
 - **Whole-recording guarantee** — long transcripts that exceed the model's context are split on sentence boundaries, refined piece by piece, then merged + de-duped, so the **beginning is never silently dropped**.
 - **Auto-managed LM Studio** — on launch Šapat starts LM Studio's server and downloads + loads the model itself; if it can't, the transcript stays on screen with a clear Retry.
 - **Tone & glossary**, plus a configurable model id (Settings).
@@ -107,6 +109,7 @@ updater picks up. Every push/PR to `main` is build-checked + tested by
 | `Sources/LMStudioClient.swift` | LM Studio refiner client: context query, chunk-if-needed + merge, system prompt |
 | `Sources/LMStudioManager.swift` | Auto-start via the `lms` CLI: server up, model downloaded + loaded |
 | `Sources/TranscriptChunker.swift` | Pure, tested sentence-boundary splitter for long transcripts |
+| `Sources/AudioImporter.swift` | Normalizes a picked/dropped audio or video file for WhisperKit |
 | `Sources/OutputSanitizer.swift` | Conservative scaffolding stripper (never eats real content) |
 | `Sources/HistoryStore.swift` · `HistoryView.swift` | JSON history + concise collapsible UI |
 | `Sources/PopoverView.swift` · `Theme.swift` | SwiftUI popover + copper-on-stone design tokens |

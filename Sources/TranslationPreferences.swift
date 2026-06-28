@@ -1,14 +1,15 @@
 import Foundation
 
-/// Translation tone presets. Only affect the LM Studio refinement path — the offline Whisper
-/// fallback can't honor them.
+/// Translation tone presets for the LM Studio refinement. `technical` is the default — the
+/// speaker is mostly dictating software work, so precision and correct terminology win.
 enum Tone: String, CaseIterable, Identifiable {
-    case polished, formal, casual, literal
+    case technical, polished, formal, casual, literal
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
+        case .technical: return "Technical"
         case .polished: return "Polished"
         case .formal: return "Formal"
         case .casual: return "Casual"
@@ -18,6 +19,8 @@ enum Tone: String, CaseIterable, Identifiable {
 
     var instruction: String {
         switch self {
+        case .technical:
+            return "Use precise, professional, technical English appropriate for software engineering. Prefer exact technical terminology and correct names for APIs, data structures, systems, and architecture; choose the specific term over a general one. Be unambiguous and concise; avoid casual phrasing, hedging, and marketing language. Where the speaker named a technical concept imprecisely, use the correct term — but never invent specifics they did not say."
         case .polished: return "Produce clean, natural, idiomatic English."
         case .formal: return "Use formal, professional English suitable for business writing."
         case .casual: return "Use relaxed, conversational English."
@@ -40,7 +43,7 @@ enum TranslationPreferences {
     static let defaultModel = "qwen/qwen3-8b"
 
     static var tone: Tone {
-        Tone(rawValue: UserDefaults.standard.string(forKey: toneKey) ?? "") ?? .polished
+        Tone(rawValue: UserDefaults.standard.string(forKey: toneKey) ?? "") ?? .technical
     }
 
     static var glossary: String {

@@ -91,8 +91,11 @@ all derive from `Sources/Brand.swift` — change identity there, not scattered l
   automatic GitHub updates (download → checksum-verify → in-place swap → relaunch), concise
   collapsible history, LM Studio (Qwen3-8B MLX) refinement with a dedup / no-fabrication /
   output-only prompt + conservative sanitizer, long-form VAD silence tuning, mandatory
-  auto-managed LM Studio (server + model via the `lms` CLI), and whole-transcript
-  chunk-and-merge refinement so long recordings aren't truncated.
+  auto-managed LM Studio (server + model via the `lms` CLI), whole-transcript
+  chunk-and-merge refinement so long recordings aren't truncated, import of any-length
+  audio/video files (drag-and-drop or picker, audio extracted via `AudioImporter`), a
+  default Technical tone for precise engineering English, and normalized model-id matching
+  so the configured `qwen/qwen3-8b` resolves to whatever `lms get` actually downloads.
 - **Deferred backlog** (good next tasks): a quit-mid-transcription guard
   (`applicationShouldTerminate` while busy); a real download/transcribe progress bar wired
   into `AppState.preparing(progress:)`; parse `lms get` progress into a percentage for the

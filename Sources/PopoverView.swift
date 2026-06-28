@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The popover UI — Šapat's warm copper-on-stone identity. Fixed width, content-driven
 /// height, with a height-bounded scrollable result. Binds to the shared
@@ -13,6 +14,8 @@ struct PopoverView: View {
     private let resultMaxHeight: CGFloat = 220
 
     @State private var tab: Tab = .record
+    @State private var showingImporter = false
+    @State private var isDropTargeted = false
     private enum Tab: Hashable { case record, history }
 
     var body: some View {
@@ -104,6 +107,8 @@ struct PopoverView: View {
         VStack(spacing: Theme.s4) {
             recordButton
             statusLine
+            if let detail = vm.processingDetail { processingDetailView(detail) }
+            if vm.canImport { importButton }
             preparingProgress
             if let status = vm.lmStudioStatus { lmStudioStatusView(status) }
             if let notice = vm.notice { noticeView(notice) }
@@ -120,6 +125,23 @@ struct PopoverView: View {
         .padding(.bottom, Theme.s4)
         .frame(maxWidth: .infinity)
         .animation(.easeInOut(duration: 0.2), value: vm.state)
+        .overlay { if isDropTargeted { dropHighlight } }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let url = urls.first else { return false }
+            vm.importRecording(from: url)
+            return true
+        } isTargeted: { targeted in
+            isDropTargeted = targeted && vm.canImport
+        }
+        .fileImporter(
+            isPresented: $showingImporter,
+            allowedContentTypes: [.audio, .movie, .audiovisualContent],
+            allowsMultipleSelection: false
+        ) { result in
+            if case .success(let urls) = result, let url = urls.first {
+                vm.importRecording(from: url)
+            }
+        }
     }
 
     // MARK: Record button (hero)
@@ -156,6 +178,47 @@ struct PopoverView: View {
     }
 
     private var buttonColor: Color { vm.isRecording ? Theme.recording : Theme.copper }
+
+    // MARK: Import (pick or drop an existing recording — any length)
+
+    private var importButton: some View {
+        Button { showingImporter = true } label: {
+            Label("Import a recording", systemImage: "waveform.badge.plus")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Theme.copperLight)
+                .padding(.horizontal, Theme.s3)
+                .padding(.vertical, 6)
+                .overlay(Capsule().strokeBorder(Theme.copperLight.opacity(0.4), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help("Transcribe an existing audio or video file — any length. Silence is skipped.")
+    }
+
+    private var dropHighlight: some View {
+        RoundedRectangle(cornerRadius: Theme.rCard, style: .continuous)
+            .fill(Theme.copper.opacity(0.08))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.rCard, style: .continuous)
+                    .strokeBorder(Theme.copper, style: StrokeStyle(lineWidth: 2, dash: [6]))
+            )
+            .overlay {
+                Label("Drop to transcribe", systemImage: "square.and.arrow.down")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.copperLight)
+            }
+            .allowsHitTesting(false)
+    }
+
+    // MARK: Processing sub-status (elapsed transcription clock / refine progress)
+
+    private func processingDetailView(_ text: String) -> some View {
+        HStack(spacing: Theme.s2) {
+            ProgressView().controlSize(.small)
+            Text(text).font(.caption).foregroundStyle(Theme.textTertiary)
+        }
+        .frame(maxWidth: .infinity)
+        .transition(.opacity)
+    }
 
     // MARK: Status (height-locked so the layout never jumps)
 
@@ -271,7 +334,14 @@ struct PopoverView: View {
 
     private var copyBar: some View {
         HStack(spacing: Theme.s2) {
-            if vm.translationSource == .lmStudio {
+            if let name = vm.importedFileName {
+                Label(name, systemImage: "waveform")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textTertiary)
+                    .labelStyle(.titleAndIcon)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else if vm.translationSource == .lmStudio {
                 Label("refined by LM Studio", systemImage: "sparkles")
                     .font(.caption2)
                     .foregroundStyle(Theme.textTertiary)

@@ -26,6 +26,10 @@ final class RecorderViewModel {
     private(set) var notice: String? // transient info, e.g. "No speech detected"
     /// Non-nil while LM Studio is being made ready (server start / model download / load).
     private(set) var lmStudioStatus: String?
+    /// Sub-status during processing: elapsed transcription time, or "Refining N of M sections…".
+    private(set) var processingDetail: String?
+    /// File name when processing an imported recording (nil for live mic recordings).
+    private(set) var importedFileName: String?
     private(set) var showCopiedConfirmation = false
 
     /// Called on every state change so AppKit (the status-bar icon) can react.
@@ -57,6 +61,15 @@ final class RecorderViewModel {
         }
     }
 
+    /// Whether Import should accept a file right now — same idea as `canRecord`, but never
+    /// while a recording is actually in progress.
+    var canImport: Bool {
+        switch state {
+        case .idle, .done: return true
+        default: return false
+        }
+    }
+
     // MARK: Dependencies
     private let whisper = WhisperEngine()
     private var llm = LMStudioClient()
@@ -72,6 +85,8 @@ final class RecorderViewModel {
     private var recorder: AVAudioRecorder?
     private var recordingURL: URL?
     private var meterTimer: Timer?
+    private var processingTimer: Timer?
+    private var processingElapsed = 0 // seconds, drives the "Transcribing · m:ss" detail
     private var copiedTask: Task<Void, Never>?
     private var noticeTask: Task<Void, Never>?
 
@@ -138,6 +153,35 @@ final class RecorderViewModel {
         default:
             break
         }
+    }
+
+    /// Transcribe + refine an existing audio or video file (picked or dropped). No length
+    /// limit — long files just take longer, and silence is skipped by the same VAD path as
+    /// a live recording. Video has its audio track extracted first.
+    func importRecording(from url: URL) {
+        guard canImport else { return }
+        clearResults()
+        importedFileName = url.lastPathComponent
+        setState(.transcribing)
+        processingDetail = "Preparing \(url.lastPathComponent)…"
+        Task { await runImport(url: url) }
+    }
+
+    private func runImport(url: URL) async {
+        let prepared: AudioImporter.Prepared
+        do {
+            prepared = try await AudioImporter.prepare(url)
+        } catch {
+            importedFileName = nil
+            processingDetail = nil
+            setState(.error(AppError(
+                message: "Couldn't read “\(url.lastPathComponent)”. \(error.localizedDescription)",
+                action: nil
+            )))
+            return
+        }
+        await transcribeAndRefine(audioPath: prepared.url.path)
+        AudioImporter.cleanUp(prepared)
     }
 
     /// Discards an in-progress recording without transcribing it (Esc / Cancel button).
@@ -249,22 +293,27 @@ final class RecorderViewModel {
             setState(.idle)
             return
         }
-        Task { await transcribeAndRefine(url: url) }
+        Task { await transcribeAndRefine(audioPath: url.path) }
     }
 
-    private func transcribeAndRefine(url: URL) async {
+    private func transcribeAndRefine(audioPath: String) async {
         setState(.transcribing)
+        startProcessingTimer()
         let serbian: String
         do {
-            serbian = try await whisper.run(audioPath: url.path, task: .transcribe, language: sourceLanguage)
+            serbian = try await whisper.run(audioPath: audioPath, task: .transcribe, language: sourceLanguage)
         } catch {
+            stopProcessingTimer()
+            processingDetail = nil
             setState(.error(AppError(
                 message: "Transcription failed. \(error.localizedDescription)",
                 action: nil
             )))
             return
         }
+        stopProcessingTimer()
         guard isMeaningful(serbian) else {
+            processingDetail = nil
             flashNotice("No speech detected — try again")
             setState(.idle)
             return
@@ -280,19 +329,25 @@ final class RecorderViewModel {
     private func refine() async {
         guard !serbianText.isEmpty else { return }
         setState(.translating)
+        processingDetail = nil
         do {
             try await ensureLMStudioReady()
             let english = try await llm.refine(
                 serbianText,
                 tone: TranslationPreferences.tone,
-                glossary: TranslationPreferences.glossary
+                glossary: TranslationPreferences.glossary,
+                onProgress: { [weak self] detail in
+                    Task { @MainActor in self?.processingDetail = detail }
+                }
             )
             finish(english: english)
         } catch is CancellationError {
             setLMStudioStatus(nil)
+            processingDetail = nil
             setState(.idle)
         } catch {
             setLMStudioStatus(nil)
+            processingDetail = nil
             setState(.error(lmStudioError(for: error)))
         }
     }
@@ -339,6 +394,7 @@ final class RecorderViewModel {
         }
         englishText = cleaned
         translationSource = .lmStudio
+        processingDetail = nil
         copyToPasteboard(cleaned)
         flashCopied()
         setState(.done)
@@ -391,6 +447,8 @@ final class RecorderViewModel {
         englishText = ""
         translationSource = nil
         notice = nil
+        processingDetail = nil
+        importedFileName = nil
     }
 
     private func setState(_ newState: AppState) {
@@ -440,6 +498,33 @@ final class RecorderViewModel {
     private func stopMetering() {
         meterTimer?.invalidate()
         meterTimer = nil
+    }
+
+    // MARK: Processing progress (transcription elapsed-time clock)
+
+    private func startProcessingTimer() {
+        processingElapsed = 0
+        processingDetail = transcriptionDetail()
+        processingTimer?.invalidate()
+        // Fires on the main run loop; we're on the main actor, so update directly.
+        processingTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.processingElapsed += 1
+                self.processingDetail = self.transcriptionDetail()
+            }
+        }
+    }
+
+    private func stopProcessingTimer() {
+        processingTimer?.invalidate()
+        processingTimer = nil
+    }
+
+    private func transcriptionDetail() -> String {
+        let clock = String(format: "%d:%02d", processingElapsed / 60, processingElapsed % 60)
+        if let name = importedFileName { return "\(name) · \(clock)" }
+        return clock
     }
 
     // MARK: Clipboard + confirmations
