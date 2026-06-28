@@ -52,6 +52,10 @@ struct LMStudioManager {
             await Self.waitUntil(timeout: 20) { await client.isServerReachable() }
         }
 
+        // An MLX model can't load without the MLX runtime — and a fresh LM Studio has none,
+        // so loading would fail with "No LM Runtime found". Make sure it's present first.
+        try await ensureRuntime(cli: cli, onStatus: onStatus)
+
         // Resolve presence robustly — a transient query failure must NOT be read as "absent"
         // and trigger a needless multi-GB download.
         switch await stablePresence(of: modelKey, client: client) {
@@ -130,6 +134,38 @@ struct LMStudioManager {
                 onStatus(status)
             }
         }
+    }
+
+    // MARK: - Inference runtime (an MLX model won't load without it)
+
+    /// Ensures an MLX runtime is installed and selected. A fresh LM Studio ships with none,
+    /// so `lms load` of an MLX (`safetensors`) model fails until one is downloaded + selected.
+    /// Cheap no-op once a runtime is active.
+    private func ensureRuntime(cli: String, onStatus: @escaping @Sendable (String) -> Void) async throws {
+        if await mlxRuntimeSelected(cli: cli) { return }
+        onStatus("Installing the MLX runtime…")
+        let output = try await Self.capture(cli, ["runtime", "get", "mlx-llm", "-y"], timeout: 1200)
+        // `lms runtime get` downloads but does NOT activate; it prints the select command.
+        if let name = Self.parseRuntimeSelectName(from: output) {
+            try? await Self.run(cli, ["runtime", "select", name], timeout: 30)
+        }
+        guard await mlxRuntimeSelected(cli: cli) else {
+            throw LMStudioError.setupFailed(
+                "Couldn't activate the MLX runtime. Open LM Studio, install or select an MLX runtime, then Retry.")
+        }
+    }
+
+    private func mlxRuntimeSelected(cli: String) async -> Bool {
+        guard let output = try? await Self.capture(cli, ["runtime", "ls"], timeout: 30) else { return false }
+        return Self.stripControlCharacters(output)
+            .split(whereSeparator: \.isNewline)
+            .contains { $0.lowercased().contains("mlx") && $0.contains("✓") }
+    }
+
+    /// `lms runtime get` prints "… lms runtime select <name>@<ver>" — pull that name out so we
+    /// can activate exactly what it just downloaded.
+    static func parseRuntimeSelectName(from output: String) -> String? {
+        captureGroups(#"runtime select\s+(\S+)"#, in: stripControlCharacters(output)).map { $0[1] }
     }
 
     // MARK: - Progress parsing (pure, unit-tested)
@@ -256,6 +292,36 @@ struct LMStudioManager {
             throw LMStudioError.setupFailed(
                 "lms \(args.first ?? "command") failed" + (detail.isEmpty ? " (exit \(process.terminationStatus))." : ": \(detail)"))
         }
+    }
+
+    /// Runs `lms` and returns its combined output (for parsing `runtime ls`/`get`). Output
+    /// goes to a temp file — no pipe to deadlock — and is returned regardless of exit code.
+    nonisolated private static func capture(_ launchPath: String, _ args: [String], timeout: TimeInterval) async throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: launchPath)
+        process.arguments = args
+        process.environment = augmentedEnvironment()
+
+        let logURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sapat-lms-\(args.first ?? "cmd")-\(UUID().uuidString).log")
+        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: logURL)
+        process.standardOutput = handle
+        process.standardError = handle
+        defer { try? FileManager.default.removeItem(at: logURL) }
+
+        try process.run()
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning {
+            if Task.isCancelled { process.terminate(); process.waitUntilExit(); throw CancellationError() }
+            if Date() > deadline {
+                process.terminate(); process.waitUntilExit()
+                throw LMStudioError.setupFailed("lms \(args.first ?? "command") timed out.")
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        try? handle.close()
+        return (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
     }
 
     nonisolated private static func augmentedEnvironment() -> [String: String] {

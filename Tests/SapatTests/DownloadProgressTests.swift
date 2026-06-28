@@ -30,4 +30,14 @@ final class DownloadProgressTests: XCTestCase {
         let stripped = LMStudioManager.stripControlCharacters("\u{1B}[2K\u{1B}[1Ghello\u{1B}[?25h")
         XCTAssertEqual(stripped, "hello")
     }
+
+    func testParsesRuntimeSelectName() {
+        let out = "Download completed.\nSelect the runtime using:\n\n  lms runtime select mlx-llm-mac-arm64-apple-metal-advsimd@1.9.1\n"
+        XCTAssertEqual(LMStudioManager.parseRuntimeSelectName(from: out),
+                       "mlx-llm-mac-arm64-apple-metal-advsimd@1.9.1")
+    }
+
+    func testRuntimeSelectNameNilWhenAbsent() {
+        XCTAssertNil(LMStudioManager.parseRuntimeSelectName(from: "Download completed. Nothing to select."))
+    }
 }
