@@ -46,6 +46,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { await updateChecker.check() } // silent background check at launch
     }
 
+    /// Quit-while-busy guard (F9): if a recording is in progress or transcription/refinement is
+    /// running, confirm before quitting so an in-flight job (or a recording) isn't silently lost.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard viewModel.isRecording || viewModel.isBusy else { return .terminateNow }
+        let alert = NSAlert()
+        if viewModel.isRecording {
+            alert.messageText = "Stop recording and quit?"
+            alert.informativeText = "You're recording. Quitting now discards the current recording."
+        } else {
+            alert.messageText = "\(Brand.displayName) is still working — quit anyway?"
+            alert.informativeText = "Transcription or refinement is in progress. Quitting now cancels it."
+        }
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Keep Working")
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+    }
+
     // MARK: Setup
 
     private func configurePopover() {

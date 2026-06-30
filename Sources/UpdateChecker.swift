@@ -72,6 +72,7 @@ final class UpdateChecker {
     private var stagedAppURL: URL?
     private var zipAssetURL: URL?
     private var checksumAssetURL: URL?
+    private var signatureAssetURL: URL?
 
     // MARK: - Check
 
@@ -119,6 +120,7 @@ final class UpdateChecker {
 
             zipAssetURL = Self.zipAsset(from: release.assets).flatMap { URL(string: $0.browserDownloadURL) }
             checksumAssetURL = Self.checksumAsset(from: release.assets).flatMap { URL(string: $0.browserDownloadURL) }
+            signatureAssetURL = Self.signatureAsset(from: release.assets).flatMap { URL(string: $0.browserDownloadURL) }
 
             // Already staged this version? Leave it ready.
             if case .readyToInstall(let staged) = phase, staged == latest { return }
@@ -161,7 +163,7 @@ final class UpdateChecker {
             try? FileManager.default.removeItem(at: zipDest)
             try FileManager.default.moveItem(at: tmpURL, to: zipDest)
 
-            // 2. Fetch the published checksum (best-effort — absence skips verification).
+            // 2. Fetch the published checksum (a cheap corruption pre-check, not the trust anchor).
             var expected: String?
             if let checksumURL = checksumAssetURL {
                 if let (cdata, _) = try? await URLSession.shared.data(from: checksumURL) {
@@ -169,9 +171,17 @@ final class UpdateChecker {
                 }
             }
 
-            // 3. Verify + unzip off the main actor (blocking file work).
+            // 3. Fetch the detached ed25519 signature — the actual trust anchor (F3).
+            var signature: Data?
+            if let signatureURL = signatureAssetURL {
+                if let (sdata, _) = try? await URLSession.shared.data(from: signatureURL) {
+                    signature = ReleaseSignature.parseSignature(sdata)
+                }
+            }
+
+            // 4. Verify (signature, fail-closed) + unzip off the main actor (blocking file work).
             let staged = try await Task.detached(priority: .utility) {
-                try Self.verifyAndUnzip(zipURL: zipDest, expectedSHA256: expected, into: cache)
+                try Self.verifyAndUnzip(zipURL: zipDest, signature: signature, expectedSHA256: expected, into: cache)
             }.value
 
             stagedAppURL = staged
@@ -229,19 +239,23 @@ final class UpdateChecker {
 
     // MARK: - File operations (nonisolated: run off the main actor)
 
-    /// Verifies the zip's SHA-256 (when a checksum is available), unzips it, locates the
-    /// `.app`, and strips the quarantine xattr so it launches without a Gatekeeper prompt.
-    nonisolated private static func verifyAndUnzip(zipURL: URL, expectedSHA256: String?, into cache: URL) throws -> URL {
+    /// Verifies the downloaded build (signature — fail closed; SHA-256 — cheap pre-check),
+    /// unzips it, locates the `.app`, and strips the quarantine xattr so it launches without a
+    /// Gatekeeper prompt. Throws (refusing the install) on any verification failure.
+    nonisolated private static func verifyAndUnzip(zipURL: URL, signature: Data?, expectedSHA256: String?, into cache: URL) throws -> URL {
         let data = try Data(contentsOf: zipURL)
+
+        // Corruption pre-check (not the trust anchor): if a checksum is published it must match.
         if let expected = expectedSHA256, !expected.isEmpty {
-            let actual = sha256Hex(data)
-            guard actual.caseInsensitiveCompare(expected) == .orderedSame else {
+            guard sha256Hex(data).caseInsensitiveCompare(expected) == .orderedSame else {
                 throw UpdateError.checksumMismatch
             }
-            Log.update.info("Update checksum verified")
-        } else {
-            Log.update.info("No checksum published — skipping verification")
         }
+
+        // Trust anchor: a valid ed25519 signature over these exact bytes against the embedded
+        // public key. FAIL CLOSED — a missing or invalid signature aborts the install.
+        try ReleaseSignature.gate(data: data, signature: signature)
+        Log.update.info("Update signature verified")
 
         let extractDir = cache.appendingPathComponent("extract", isDirectory: true)
         try? FileManager.default.removeItem(at: extractDir)
@@ -333,6 +347,11 @@ final class UpdateChecker {
 
     nonisolated static func checksumAsset(from assets: [ReleaseAsset]) -> ReleaseAsset? {
         assets.first { $0.name.lowercased().hasSuffix(".sha256") }
+    }
+
+    /// The detached signature asset (`*.sig`) — the trust anchor for the in-app updater.
+    nonisolated static func signatureAsset(from assets: [ReleaseAsset]) -> ReleaseAsset? {
+        assets.first { $0.name.lowercased().hasSuffix(".sig") }
     }
 
     nonisolated private static func normalize(_ version: String) -> String {

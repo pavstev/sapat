@@ -22,15 +22,32 @@ else
 fi
 
 echo "▶ Finding the latest release…"
-asset_url="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(next(a['browser_download_url'] for a in d['assets'] if a['name'].endswith('.zip')))")"
+release_json="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")"
+asset_url="$(printf '%s' "$release_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(next(a['browser_download_url'] for a in d['assets'] if a['name'].endswith('.zip')))")"
 [[ -n "$asset_url" ]] || { echo "✗ No .zip asset on the latest release"; exit 1; }
 echo "  $asset_url"
+csum_url="$(printf '%s' "$release_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(next((a['browser_download_url'] for a in d['assets'] if a['name'].endswith('.sha256')), ''))")"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 echo "▶ Downloading…"
 curl -fsSL "$asset_url" -o "$tmp/Sapat.zip"
+
+# Integrity pre-check: verify the published SHA-256 if present. (The in-app updater additionally
+# verifies an ed25519 signature; this bootstrap installer checks the checksum.)
+if [[ -n "$csum_url" ]]; then
+  echo "▶ Verifying checksum…"
+  curl -fsSL "$csum_url" -o "$tmp/Sapat.zip.sha256"
+  expected="$(awk '{print $1}' "$tmp/Sapat.zip.sha256" | head -n1)"
+  actual="$(shasum -a 256 "$tmp/Sapat.zip" | awk '{print $1}')"
+  if [[ "$expected" != "$actual" ]]; then
+    echo "✗ Checksum mismatch — refusing to install (expected $expected, got $actual)"; exit 1
+  fi
+  echo "  ✓ checksum verified"
+else
+  echo "  (no checksum published for this release — skipping)"
+fi
+
 echo "▶ Unzipping…"
 ditto -x -k "$tmp/Sapat.zip" "$tmp"
 echo "▶ Installing to /Applications…"
