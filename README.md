@@ -4,7 +4,7 @@
 
 <h1 align="center">Šapat</h1>
 
-<p align="center">A native macOS menu bar app that turns Serbian speech into clean, precise English — on-device.</p>
+<p align="center">A native macOS menu-bar app that turns spoken Serbian into clear, structured, genuinely useful output — entirely on your Mac.</p>
 
 <p align="center">
   <a href="https://github.com/pavstev/sapat/actions/workflows/ci.yml"><img src="https://github.com/pavstev/sapat/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -15,43 +15,62 @@
 
 ---
 
-Press `⌥⇧Space` (or click the menu bar **Ш**), speak Serbian, and Šapat transcribes it
-on-device with [WhisperKit](https://github.com/argmaxinc/argmax-oss-swift), refines it into
-concise English with a local [LM Studio](https://lmstudio.ai) model, and copies the result
-to your clipboard. Everything runs on your Mac.
+Press `⌥⇧Space` (or click the menu-bar **Ш**), speak Serbian, and Šapat transcribes it
+on-device with [WhisperKit](https://github.com/argmaxinc/argmax-oss-swift), then runs your
+words through a local **thinking pipeline** — clean, extract structure, recall your own past
+notes, reason, self-critique, synthesize — and produces the artifact you asked for. Everything
+runs on your Mac, with **no external services**.
 
 > *Šapat* (шапат) is Serbian for "whisper" — a nod to the on-device Whisper engine. The
 > icon is **Ш**, the Cyrillic letter that opens the word.
 
-## How it works
+## What it does
+
+Šapat is a local-first thinking workspace for a developer who brain-dumps long spoken
+monologues and wants them turned into something useful — not just cleaned grammar.
 
 ```
-record (16 kHz mono WAV)
-   └─ WhisperKit large-v3 (Serbian, VAD)  ──▶  transcript          quiet pauses are skipped,
-        └─ refine with LM Studio · Qwen3-8B (MLX):                  long monologues stay accurate
-             ├─ fits the model's context  ──▶  one pass            dedup + formalize
-             └─ too long for context      ──▶  split → refine →     every part is refined, then
-                                                merge               merged so nothing is dropped
-   └─ show both, auto-copy English, save to history
+record / import audio
+   └─ WhisperKit large-v3 (Serbian, VAD)  ──▶  transcript     quiet pauses skipped
+        └─ ThoughtPipeline (local LLM):
+             1. Clean       de-dup, de-filler, formalize — the whole recording, never truncated
+             2. Extract     intent, decisions, questions, action items, entities (typed, schema-constrained)
+             3. Retrieve    your own related past notes from on-device semantic memory
+             4. Reason      options, trade-offs, risks — grounded only in what you said
+             5. Critique    a second pass that strips overclaims / anything ungrounded
+             6. Synthesize  render the artifact for the selected Output Mode
+   └─ show, auto-copy, save + index into memory
 ```
 
-The refiner is told to **work only with what was said**: it removes repetition and filler,
-states your intent **once** in precise technical English, and **adds nothing** — no invented
-facts. It returns the clean text only (no LM preambles, quotes, or notes; a sanitizer strips
-any that leak). Tone presets and a glossary tune the result.
+The whole pipeline keeps the original **no-fabrication** ethos: it works *only with what you
+said*, states each idea once, and adds nothing — and a conservative sanitizer strips any model
+scaffolding that leaks. Pure-refine modes (Polished English/Serbian) skip straight from Clean
+to output, so the flagship translation is as fast and faithful as ever.
+
+## Output Modes
+
+Pick inline (no Settings screen) — each is a small pipeline config:
+
+| Mode | What you get |
+| --- | --- |
+| **Polished English** | Your Serbian, cleaned and de-duplicated into one precise English statement (today's flagship behaviour, unchanged). |
+| **Polished Serbian** | The same faithful cleanup, output in Serbian — not translated. |
+| **Structured brief** | Intent, topics, decisions, open questions, action items, uncertainties. |
+| **Engineering report** | A PR-style write-up: problem, approach, trade-offs, what was verified, risks. |
+| **Prompt refiner** | A rambling monologue → one tight, self-contained prompt to paste into an AI assistant. |
+| **Standup** | Yesterday / Today / Blockers, mapped from what you reported. |
 
 ## Features
 
-- **On-device transcription** — WhisperKit `large-v3` with VAD silence handling, tuned for long, pause-heavy monologues (5–10 min).
-- **Import any recording** — pick or drag in an audio **or video** file of any length; the audio track is extracted, silence is skipped, and it's transcribed + refined like a live take, with elapsed-time and per-section progress.
-- **Local refinement (required)** — LM Studio (`qwen/qwen3-8b`, MLX) deduplicates and formalizes the transcript into concise, precise English without fabricating; output-only. It's the only refinement path — there is no Whisper fallback.
-- **Auto-managed** — on launch Šapat starts LM Studio's server, installs the MLX runtime, and downloads + loads the model itself; if it can't, your transcript stays on screen with a clear Retry.
-- **Technical by default** — the default tone produces precise, professional engineering English (switch tones from the on-screen dropdown).
+- **On-device transcription** — WhisperKit `large-v3` with VAD silence handling, tuned for long, pause-heavy monologues. (large-v3 is kept deliberately over the faster "turbo" model for Serbian accuracy.)
+- **Self-contained inference** — the reasoner runs **in-process via [MLX](https://github.com/ml-explore/mlx-swift)** on Apple Silicon. No other apps, no `lms` CLI, no localhost server. (LM Studio remains an optional opt-in backend.)
+- **Persistent semantic memory** — past transcripts and artifacts are indexed locally (SQLite + FTS5 keyword + on-device embeddings, fused with Reciprocal Rank Fusion). The pipeline recalls your related prior context so it answers with your accumulated knowledge.
 - **Whole-recording guarantee** — long transcripts that exceed the model's context are split on sentence boundaries, refined piece by piece, then merged + de-duped, so the **beginning is never silently dropped**.
-- **Five tone presets** — pick from a dropdown on the only screen; hover a tone for a one-line explanation of what it does. No settings window.
-- **Concise history that keeps your recordings** — searchable, tap-to-expand rows. If a transcription or refinement fails, the entry is kept with its recording so you can **Retry** it straight from History; nothing said is lost.
-- **Global hotkey** `⌥⇧Space` to start/stop; **Esc** cancels a recording. The menu bar **Ш** animates as a live waveform while recording, with a live timer and first-run model-download progress in the popover.
-- **Automatic updates** — checks GitHub Releases, then downloads, checksum-verifies, swaps the bundle in place, and relaunches.
+- **Import any recording** — pick or drag in an audio **or video** file of any length; the audio track is extracted, silence skipped, transcribed + run through the pipeline like a live take.
+- **Models managed, not re-downloaded** — model weights live in `~/Library/Application Support/Sapat/Models`, *outside* the app bundle, so an in-place update never wipes them and a multi-GB model is fetched once and reused across every release.
+- **Concise history that keeps your recordings** — searchable, tap-to-expand rows. If a job fails, the entry is kept with its recording so you can **Retry** it; nothing said is lost.
+- **Global hotkey** `⌥⇧Space` to start/stop; **Esc** cancels. The menu-bar **Ш** animates as a live waveform while recording. Quitting mid-job asks first.
+- **Secure automatic updates** — checks GitHub Releases, downloads, **verifies a detached ed25519 signature** against a key embedded in the app (fail-closed — a tampered or unsigned build is refused), swaps the bundle in place, and relaunches.
 
 ## Install
 
@@ -59,74 +78,68 @@ any that leak). Tone presets and a glossary tune the result.
 curl -fsSL https://raw.githubusercontent.com/pavstev/sapat/main/scripts/install.sh | bash
 ```
 
-Cleans up any prior install, downloads the latest release, strips the Gatekeeper quarantine
-(it's **ad-hoc signed**, so a manual install needs `xattr -dr com.apple.quarantine
-/Applications/Sapat.app`), installs to `/Applications`, and launches. First launch downloads
-the `large-v3` model (~2.9 GB) and asks once for the microphone. Reset with
-`./scripts/cleanup.sh [--purge]`.
+Cleans up any prior install, downloads the latest release, verifies its checksum, strips the
+Gatekeeper quarantine (it's **ad-hoc signed**, so a manual install needs `xattr -dr
+com.apple.quarantine /Applications/Sapat.app`), installs to `/Applications`, and launches.
+First launch downloads the speech + reasoner models (cached thereafter, outside the bundle) and
+asks once for the microphone. Reset with `./scripts/cleanup.sh [--purge]`.
 
-### Local refinement with LM Studio (required)
-
-```sh
-brew install --cask lm-studio        # or download from https://lmstudio.ai
-#  then, once, in LM Studio: install the `lms` command-line tool
-```
-
-LM Studio does the refinement, so it's required. You don't have to configure it: on launch
-Šapat finds the `lms` CLI, starts the server (`:1234`), and downloads + loads the model
-(`qwen/qwen3-8b` MLX, ~5 GB) with a generous context window. If LM Studio can't be made ready,
-Šapat keeps your transcript on screen and offers **Retry** + **Open LM Studio** rather than
-producing a rougher result. The model id defaults to `qwen/qwen3-8b`.
+No external apps are required.
 
 ## Build from source
 
-No full Xcode needed — Šapat builds with the Command Line Tools via SwiftPM.
-
 ```sh
-xcode-select --install
 git clone https://github.com/pavstev/sapat.git && cd sapat
 ./bundle.sh && open Sapat.app        # swift build + assemble & ad-hoc sign
 ```
 
+The in-process **MLX** engine (the self-contained default) requires the **full Xcode**
+toolchain — `xcodebuild` compiles MLX's Metal kernels, which the Command Line Tools cannot — so
+it is staged behind `#if canImport(MLXLLM)`. The engine-agnostic layers (Inference, Pipeline,
+Memory, Updater) build and test under the Command Line Tools today; the one-time MLX activation
+(wire the package, switch to `xcodebuild`) is documented in [AGENTS.md](AGENTS.md).
+
 Overrides: `SAPAT_VERSION=1.2.3` stamps a version; `SAPAT_UNIVERSAL=1` builds universal.
-Tests: `swift test`.
+Tests: `swift test` (XCTest; the full suite runs under Xcode, which the CI uses).
 
 ## Releasing
 
 Tag-triggered and automated by [`release.yml`](.github/workflows/release.yml): `git tag
-v1.3.0 && git push origin v1.3.0` builds, zips, and publishes a GitHub Release the in-app
-updater picks up. Every push/PR to `main` is build-checked + tested by
-[`ci.yml`](.github/workflows/ci.yml).
+v1.3.0 && git push origin v1.3.0` builds, signs (ed25519), and publishes a GitHub Release the
+in-app updater picks up. Signing uses the `SAPAT_SIGNING_KEY` repository secret; the matching
+public key is embedded in [`ReleaseSignature.swift`](Sources/ReleaseSignature.swift). Every
+push/PR to `main` is build-checked + tested by [`ci.yml`](.github/workflows/ci.yml).
 
 ## Project layout
 
 | Path | Responsibility |
 | --- | --- |
-| `Sources/Brand.swift` | Single source of truth: name, bundle id, repo slug, paths |
-| `Sources/SapatApp.swift` · `AppDelegate.swift` | `@main`; status item, popover, hotkey, menu-bar glyph/waveform |
-| `Sources/RecorderViewModel.swift` | `@Observable @MainActor` record → transcribe → refine flow |
+| `Sources/Brand.swift` | Single source of truth: name, bundle id, repo slug, on-disk paths |
+| `Sources/Inference/` | `Inference` protocol; `Refiner` (Clean + whole-recording chunk/merge); `MLXInference` (default), `LMStudioInference` (opt-in) |
+| `Sources/Pipeline/` | `ThoughtPipeline` (the staged "thinking"); `OutputMode` registry; `Extraction` (§6 schema) |
+| `Sources/Memory/` | `MemoryStore` (GRDB + FTS5 + vector, RRF hybrid); `Embedder` (NaturalLanguage) |
+| `Sources/Models/ModelStore.swift` | Self-managed, resumable, integrity-checked model downloads (outside the bundle) |
+| `Sources/RecorderViewModel.swift` | `@Observable @MainActor` record → transcribe → pipeline flow |
 | `Sources/WhisperEngine.swift` | WhisperKit wrapper, tuned for long-form VAD silence handling |
-| `Sources/LMStudioClient.swift` | LM Studio refiner client: context query, chunk-if-needed + merge, system prompt |
-| `Sources/LMStudioManager.swift` | Auto-start via the `lms` CLI: server up, model downloaded + loaded |
-| `Sources/TranscriptChunker.swift` | Pure, tested sentence-boundary splitter for long transcripts |
-| `Sources/AudioImporter.swift` | Normalizes a picked/dropped audio or video file for WhisperKit |
-| `Sources/OutputSanitizer.swift` | Conservative scaffolding stripper (never eats real content) |
-| `Sources/HistoryStore.swift` · `HistoryView.swift` | JSON history + concise collapsible UI |
-| `Sources/PopoverView.swift` · `TonePicker.swift` · `Theme.swift` | SwiftUI popover, on-screen tone dropdown, copper-on-stone design tokens |
-| `Sources/UpdateChecker.swift` | GitHub Releases auto-updater (download → verify → swap) |
-| `Sources/GlobalHotKey.swift` | Carbon `RegisterEventHotKey` wrapper (⌥⇧Space) |
-| `bundle.sh` · `scripts/` · `.github/workflows/` | Build/assemble, install/cleanup, CI + release |
+| `Sources/OutputSanitizer.swift` | Conservative scaffolding stripper (reused by the pipeline) |
+| `Sources/HistoryStore.swift` · `HistoryView.swift` | JSON history (record of truth) + concise UI; indexes into memory |
+| `Sources/PopoverView.swift` · `OutputModePicker.swift` · `Theme.swift` | SwiftUI popover, on-screen mode dropdown, copper-on-stone tokens |
+| `Sources/UpdateChecker.swift` · `ReleaseSignature.swift` | Auto-updater + fail-closed ed25519 verification |
+| `Sources/GlobalHotKey.swift` | Carbon `RegisterEventHotKey` wrapper (⌥⇧Space, permission-free) |
+| `bundle.sh` · `scripts/` · `.github/workflows/` | Build/assemble, install/cleanup, release signing, CI |
 
 ## Notes
 
-- First run downloads `large-v3` (~2.9 GB) and, via LM Studio, the refinement model (~5 GB); both cached thereafter. Releases are ad-hoc signed, not notarized.
-- LM Studio is required for refinement; Šapat starts its server and loads the model automatically (and chunks long transcripts so none is dropped).
+- First run downloads the WhisperKit speech model and the MLX reasoner model; both cached outside the bundle and reused across updates. Releases are ad-hoc signed, not notarized (a Developer ID notarization path is documented in `AGENTS.md`).
+- Everything is local-only and private by default; raw audio/text never leaves the machine. An optional cloud backend exists for development and is **off by default**.
 - Bundle id: `com.stevanpavlovic.Sapat`.
 
 ## Dependencies
 
-- [WhisperKit](https://github.com/argmaxinc/argmax-oss-swift) — on-device speech (pinned to 1.0.0)
-- [LM Studio](https://lmstudio.ai) + its `lms` CLI and an MLX model (`qwen/qwen3-8b`) — required for refinement (auto-managed)
+- [WhisperKit](https://github.com/argmaxinc/argmax-oss-swift) — on-device speech (MIT)
+- [MLX Swift](https://github.com/ml-explore/mlx-swift) + [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm) — in-process local LLM on Apple Silicon (MIT)
+- [GRDB.swift](https://github.com/groue/GRDB.swift) — SQLite + FTS5 for semantic memory (MIT)
+- A bundled/managed quantized reasoner model (Qwen3-class, MLX, Apache-2.0)
 
 ## License
 

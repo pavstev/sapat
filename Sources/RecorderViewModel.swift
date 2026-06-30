@@ -85,8 +85,19 @@ final class RecorderViewModel {
     /// engine becomes the default once the build moves to `xcodebuild`. Swapping this never
     /// touches a caller — refinement goes through the `Inference` protocol and `Refiner`, so
     /// the orchestrator no longer hard-depends on LM Studio (F1).
-    private let inference: any Inference = LMStudioInference()
+    private let inference: any Inference = RecorderViewModel.makeInference()
     @ObservationIgnored private lazy var pipeline = ThoughtPipeline(inference: inference, memory: .shared)
+
+    /// Selects the default backend: in-process MLX when its package is present (the shippable
+    /// build via xcodebuild), otherwise the LM Studio backend (the CLT fallback + opt-in). The
+    /// rest of the app is engine-agnostic, so this is the only place the default is chosen.
+    private static func makeInference() -> any Inference {
+        #if canImport(MLXLLM)
+        return MLXInference()
+        #else
+        return LMStudioInference()
+        #endif
+    }
     /// Coalesces concurrent readiness work (the launch warm-up and a refine) so we never run
     /// two model downloads/loads at once.
     private var readinessTask: Task<Void, Error>?

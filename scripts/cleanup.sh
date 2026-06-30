@@ -3,10 +3,11 @@
 # anything left running so install.sh starts fresh. Idempotent — safe to run anytime.
 #
 #   ./scripts/cleanup.sh           quit + uninstall the app, clear local build artifacts
-#   ./scripts/cleanup.sh --purge   ALSO delete saved history + the downloaded Whisper model
+#   ./scripts/cleanup.sh --purge   ALSO delete saved history + the memory index + downloaded models
 #
-# (This is the place to add teardown for any future moving parts — e.g. a bundled
-#  server, a Docker service, or a launch agent. Šapat currently has none of those.)
+# Inference runs in-process (MLX), so there is no sidecar server/daemon to tear down. Model
+# weights and the memory index live under ~/Library/Application Support/Sapat (cleared by
+# --purge); the WhisperKit cache under ~/Documents/huggingface is cleared too.
 set -euo pipefail
 
 PURGE=0
@@ -26,9 +27,11 @@ if [[ -f Package.swift ]]; then
 fi
 
 if [[ $PURGE -eq 1 ]]; then
-  echo "▶ Purging saved history + downloaded model…"
+  echo "▶ Purging saved history, memory index, and downloaded models…"
+  # Covers history.json, memory.sqlite, Recordings/, and Models/ (reasoner weights).
   rm -rf "$HOME/Library/Application Support/Sapat"
+  # WhisperKit's own model cache.
   rm -rf "$HOME/Documents/huggingface/models/argmaxinc/whisperkit-coreml/openai_whisper-large-v3"
 fi
 
-echo "✓ Clean slate. (LM Studio, if installed, is left untouched.)"
+echo "✓ Clean slate."

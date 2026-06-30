@@ -10,6 +10,14 @@ packages:
   WhisperKit:
     url: https://github.com/argmaxinc/argmax-oss-swift
     from: "1.0.0"
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: "7.0.0"
+  # MLX engine (added during the one-time activation — see AGENTS.md):
+  #   MLXSwiftLM:
+  #     url: https://github.com/ml-explore/mlx-swift-lm
+  #     from: "<pin>"
+  # then add products MLXLLM + MLXLMCommon to the dependencies below.
 
 targets:
   Sapat:
@@ -18,9 +26,12 @@ targets:
     deploymentTarget: "14.0"
     sources:
       - path: Sources
+      - path: Resources
     dependencies:
       - package: WhisperKit
         product: WhisperKit
+      - package: GRDB
+        product: GRDB
     settings:
       base:
         PRODUCT_NAME: Sapat

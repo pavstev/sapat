@@ -1,20 +1,23 @@
 # AGENTS.md — setup instructions for AI agents
 
-This file tells any AI agent (Cursor, Claude Code, Windsurf, …) how to set up Šapat on
-a user's Mac. **If a user hands you a link to this repo and asks you to "install / set up
+This file tells any AI agent (Cursor, Claude Code, Windsurf, …) how to set up and build Šapat
+on a user's Mac. **If a user hands you a link to this repo and asks you to "install / set up
 Šapat", follow the _Install_ section below — it's fully scripted.**
 
-Šapat is a macOS 14+ menu bar app: record Serbian → on-device WhisperKit transcription →
-English (LM Studio refinement, required and auto-managed). Distributed via GitHub Releases, ad-hoc signed.
+Šapat is a macOS 14+ menu-bar app: record/​import Serbian speech → on-device WhisperKit
+transcription → a local **ThoughtPipeline** (clean → extract → retrieve → reason → critique →
+synthesize) run by an **in-process MLX** model → the artifact for the selected Output Mode.
+**No external services, no other apps required.** Distributed via GitHub Releases, ad-hoc
+signed, with a fail-closed (ed25519) in-app updater.
 
 For the user-facing feature overview, see [README.md](README.md) — this file stays focused on
 setup, build, and the agent/maintainer specifics.
 
 ## Install (do this when asked to set up the app)
 
-The installer cleans up any prior install, downloads the latest release, strips the
-Gatekeeper quarantine (the app is ad-hoc signed, not notarized), installs to
-`/Applications`, and launches it:
+The installer cleans up any prior install, downloads the latest release, verifies its
+checksum, strips the Gatekeeper quarantine (the app is ad-hoc signed, not notarized), installs
+to `/Applications`, and launches:
 
 ```sh
 git clone https://github.com/pavstev/sapat.git
@@ -30,84 +33,125 @@ curl -fsSL https://raw.githubusercontent.com/pavstev/sapat/main/scripts/install.
 
 Then tell the user:
 - On first launch macOS asks for **microphone** access — they must **Allow** it.
-- First launch downloads a **~2.9 GB** Whisper model (one time); the popover shows "Preparing model…".
+- First launch downloads the **speech model** (WhisperKit) and the **reasoner model** (MLX),
+  cached **outside** the app bundle in `~/Library/Application Support/Sapat/Models`, so updates
+  never re-download them. The popover shows real download progress.
 - The app lives in the **menu bar** (a **Ш** glyph), with **no Dock icon**.
 - Default hotkey is **⌥⇧Space** (start/stop recording from anywhere).
-- **Required** for refined translations: install LM Studio and its `lms` CLI — `brew install --cask lm-studio`, then in LM Studio enable the command-line tool ("Install `lms`"). Šapat then starts the server (:1234) and downloads + loads the model (`qwen/qwen3-8b` MLX, ~5 GB) itself on launch — no manual `lms get`/`server start` needed. Without LM Studio there is no fallback: the transcript is shown with a Retry.
+- **No other apps are required** — inference runs in-process. (LM Studio is an optional opt-in
+  backend only.)
 
-Requirements: macOS 14+, `curl` + `python3` (preinstalled on macOS), and LM Studio + `lms` for refinement.
+Requirements: macOS 14+ (Apple Silicon), `curl` + `python3` (preinstalled on macOS).
 
 ## Clean slate (precondition)
 
-`install.sh` runs this automatically, but you can run it directly to fully reset:
-
 ```sh
 ./scripts/cleanup.sh            # quit + uninstall the app, clear build artifacts
-./scripts/cleanup.sh --purge    # ALSO delete saved history + the downloaded model
+./scripts/cleanup.sh --purge    # ALSO delete saved history, the memory index, and downloaded models
 ```
 
-## Build from source (no Xcode required)
+## Build from source
 
 ```sh
-xcode-select --install   # if the Command Line Tools aren't present
-./bundle.sh              # swift build + assemble & ad-hoc sign Sapat.app
-open Sapat.app
+./bundle.sh && open Sapat.app    # currently: swift build + assemble & ad-hoc sign
 ```
+
+Today `bundle.sh` uses `swift build` (Command Line Tools), which compiles the **engine-agnostic
+layers** (Inference, Pipeline, Memory, Updater) — the `Inference` default then resolves to the
+optional LM Studio backend, since the in-process MLX engine is staged behind
+`#if canImport(MLXLLM)`.
+
+The **self-contained default (MLX)** requires the **full Xcode** toolchain because MLX Swift's
+Metal kernels (`default.metallib`) are compiled by Xcode's Metal compiler and are not shipped
+precompiled — a plain `swift build` produces a binary that crashes on the first GPU op. Turning
+it on is the one-time activation below; after that, `bundle.sh` drives `xcodebuild`.
 
 ## Conventions & gotchas (if you edit the code)
 
-- **No full Xcode** — build with `swift build` / `./bundle.sh`. Do **not** add anything
-  that needs an Xcode-only macro plugin: it won't compile under the Command Line Tools.
-  This already bit `SwiftData` (`@Model`/`@Query`), Swift Testing (`import Testing`), and
-  `#Preview`. (History therefore uses a JSON store; tests use `XCTest` and run in CI.)
-- **Swift 6 language mode is on** — preserve the `actor` / `@MainActor` isolation.
-- Refinement is **required** and LM-Studio-only (no Whisper fallback). `LMStudioManager`
-  drives the `lms` CLI to start the server + download/load the model; `LMStudioClient` reads
-  the loaded context length from the native `/api/v0/models` and, when a transcript won't
-  fit, splits it (`TranscriptChunker`), refines each piece, and merges — so the start of a
-  long recording is never silently truncated. When LM Studio can't be made ready the
-  transcript is kept on screen with Retry + Open LM Studio.
-- Global hotkey is **⌥⇧Space** via Carbon `RegisterEventHotKey`.
-- Ad-hoc signed, non-sandboxed, local-only. Releases are tag-triggered: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-- Always verify a change with `./bundle.sh` then launch — it's a menu-bar agent (no Dock icon).
+- **Build with `xcodebuild`** (full Xcode). The old "no full Xcode / `swift build` only" rule
+  is **dropped** — it blocked MLX Swift (Metal shaders) and Apple Foundation Models
+  (`@Generable`). `swift build` still compiles the engine-agnostic layers (Inference, Pipeline,
+  Memory, Updater) under the CLT for fast iteration; the MLX engine is guarded by
+  `#if canImport(MLXLLM)` so the CLT build stays green. (SwiftData/`#Preview`/Swift Testing are
+  now technically available too, but are **not** adopted — keep diffs focused; tests stay XCTest.)
+- **Swift 6 strict concurrency is on.** Preserve isolation: `RecorderViewModel`/`HistoryStore`
+  are `@MainActor @Observable`; the heavy work (`WhisperEngine`, `Refiner`, `ThoughtPipeline`,
+  `MemoryStore`, `MLXInference`) lives in **actors** so it never blocks the main actor. Marshal
+  back with `Task { @MainActor in … }`.
+- **Inference is engine-agnostic.** Everything refines through the `Inference` protocol +
+  `Refiner`/`ThoughtPipeline`; selecting a backend never changes a caller. Default is in-process
+  **MLX** (`MLXInference`); **LM Studio** (`LMStudioInference`) is an opt-in; an optional cloud
+  `AnthropicInference` is off by default. LM-Studio-specific bits (the `lms` CLI, `:1234`) are
+  sealed inside `LMStudioInference`/`LMStudioManager`/`LMStudioClient`.
+- **The whole-recording guarantee + no-fabrication contract are load-bearing.** `Refiner` (the
+  Clean stage) splits long transcripts on sentence boundaries, refines each, and merges +
+  de-dupes — the start is never truncated. Prompts work *only with what was said*;
+  `OutputSanitizer` is a mechanical net on each reply. Don't regress these.
+- **Models live outside the bundle** (`Brand.modelsDirectory()` →
+  `~/Library/Application Support/Sapat/Models`) so the in-place updater never wipes them and a
+  multi-GB model is fetched once. `ModelStore` does resumable, integrity-checked,
+  never-re-downloaded fetches; MLX/WhisperKit caches are likewise external.
+- **Updates are fail-closed.** `UpdateChecker` verifies a detached **ed25519** signature over
+  the zip against the public key embedded in `ReleaseSignature.swift`; a missing/invalid
+  signature **aborts** the install (SHA-256 is only a corruption pre-check). Releases are signed
+  in CI from the `SAPAT_SIGNING_KEY` secret (`scripts/sign-release.swift`).
+- **Hotkey is ⌥⇧Space** via Carbon `RegisterEventHotKey` — kept deliberately: it needs no
+  Accessibility permission, unlike a `CGEvent` tap. Bridged to Swift concurrency with
+  `MainActor.assumeIsolated`.
+- Ad-hoc signed, non-sandboxed, local-only. Releases are tag-triggered: `git tag vX.Y.Z &&
+  git push origin vX.Y.Z`. Always verify a change by building + launching (menu-bar agent, no
+  Dock icon).
+
+## Activating / validating the MLX engine (one-time, needs full Xcode)
+
+The in-process MLX engine is staged behind `#if canImport(MLXLLM)`. To turn it on:
+
+1. Install full Xcode (`xcodes install --latest`; `sudo xcode-select -s …`).
+2. Add the package dependency in **`Package.swift`** and **`project.yml`**:
+   `https://github.com/ml-explore/mlx-swift-lm` → products `MLXLLM`, `MLXLMCommon`.
+3. `./bundle.sh` (now uses `xcodebuild`). `canImport(MLXLLM)` becomes true, so `MLXInference`
+   compiles and becomes the default backend; verify `Sapat.app/Contents/.../mlx-swift_Cmlx.bundle/default.metallib`
+   ships, and validate `MLXInference` against the pinned `mlx-swift-lm` API (the model-load /
+   generate calls are the version-sensitive surface).
+4. `xcodebuild test -scheme Sapat` — run the full suite (XCTest needs Xcode; it is unavailable
+   to `swift test` under the Command Line Tools).
+
+## Notarization (when a Developer ID is available)
+
+Ad-hoc signing means the installer strips quarantine. For a notarized build: sign with a
+"Developer ID Application" cert + hardened runtime (`--options runtime --timestamp`), then
+`xcrun notarytool submit Sapat.zip --apple-id … --team-id … --password … --wait` and `xcrun
+stapler staple Sapat.app`. Keep the in-app ed25519 check regardless — notarization is OS-level
+trust; the embedded-key signature proves the bytes came from this release pipeline (fail-closed).
 
 ## Continuing on a new machine (or a fresh Claude)
 
-Everything needed lives in this repo — Git is the source of truth, there is no external
-state. To pick development back up on another Mac:
-
-1. **Prereqs:** macOS 14+, Command Line Tools (`xcode-select --install`), `git`, `gh`.
-2. **Identity:** `gh auth login` (GitHub account **pavstev**), then
-   `git config user.name pavstev && git config user.email pavstev@users.noreply.github.com`.
+1. **Prereqs:** macOS 14+ (Apple Silicon), **full Xcode** (for MLX) — `xcodes install --latest`;
+   `xcodegen` (`brew install xcodegen`); `git`, `gh`.
+2. **Identity:** `gh auth login` (GitHub **pavstev**), then `git config user.name pavstev &&
+   git config user.email pavstev@users.noreply.github.com`.
 3. `git clone https://github.com/pavstev/sapat.git && cd sapat`
-4. Build + run: `./bundle.sh && open Sapat.app` (first launch re-downloads the ~2.9 GB model).
-5. Read the **Conventions & gotchas** above before editing. History is in the commit log;
-   in-flight work is in GitHub issues/PRs.
+4. Build + run: `./bundle.sh && open Sapat.app`.
+5. Read **Conventions & gotchas** before editing. History is in the commit log; in-flight work
+   is in GitHub issues/PRs.
 
-Identity facts: bundle id `com.stevanpavlovic.Sapat`; no Apple Developer account
-(ad-hoc signing); no full Xcode (build via SwiftPM/CLT). Names, paths, and the repo slug
-all derive from `Sources/Brand.swift` — change identity there, not scattered literals.
+Identity facts: bundle id `com.stevanpavlovic.Sapat`; no Apple Developer account (ad-hoc
+signing). Names, paths, and the repo slug derive from `Sources/Brand.swift`.
 
 ## Project status & roadmap
 
-- **Shipped:** Šapat rebrand (name/icon/bundle/repo from `Brand.swift`), copper-on-stone UI,
-  automatic GitHub updates (download → checksum-verify → in-place swap → relaunch), concise
-  collapsible history, LM Studio (Qwen3-8B MLX) refinement with a dedup / no-fabrication /
-  output-only prompt + conservative sanitizer, long-form VAD silence tuning, mandatory
-  auto-managed LM Studio (server + model via the `lms` CLI), whole-transcript
-  chunk-and-merge refinement so long recordings aren't truncated, import of any-length
-  audio/video files (drag-and-drop or picker, audio extracted via `AudioImporter`), and
-  normalized model-id matching so the configured `qwen/qwen3-8b` resolves to whatever `lms
-  get` actually downloads. **No Settings screen** — the popover is the whole app; the one
-  preference (tone) is chosen inline via `TonePicker` (a dropdown of five presets, each with
-  a hover explanation), defaulting to Technical. **History keeps recordings**: every job
-  (live or imported) is stored with its audio linked; a failed transcription/refinement is
-  saved as a `failed` entry and offers **Retry** straight from History, re-running the kept
-  recording — and failed recordings are held out of `pruneOldRecordings` so a retry stays
-  possible.
-- **Deferred backlog** (good next tasks): a quit-mid-transcription guard
-  (`applicationShouldTerminate` while busy); a real download/transcribe progress bar wired
-  into `AppState.preparing(progress:)`; parse `lms get` progress into a percentage for the
-  warm-up status row.
-- **Cut a release:** `git tag vX.Y.Z && git push origin vX.Y.Z` → CI builds + publishes the
-  GitHub Release; the in-app updater and `scripts/install.sh` pick it up automatically.
+- **Shipped (the re-architecture):**
+  1. **Self-contained inference** — engine-agnostic `Inference` protocol; `Refiner` actor;
+     `ModelStore` for self-managed external model downloads; LM Studio severed to an opt-in.
+  2. **ThoughtPipeline + Output Modes** — staged clean/extract/reason/critique/synthesize; six
+     data-driven modes; Polished English unchanged.
+  3. **Semantic memory** — GRDB + FTS5 + on-device embeddings, RRF hybrid; retrieval wired into
+     the pipeline; history indexed (JSON stays the record of truth, retry preserved).
+  4. **Hardening** — fail-closed ed25519 updater (+ CI signing); quit-while-busy guard.
+  5. **Docs/tests/release** — this rewrite; XCTest coverage for the pipeline, sanitizer, memory,
+     and the updater's fail-closed verification.
+- **Deferred backlog:** swap the reasoner to a larger local model via a setting; `sqlite-vec`
+  ANN for memory at scale (v2); `NLContextualEmbedding` for Serbian semantic search (v2);
+  notarization once a Developer ID exists.
+- **Cut a release:** `git tag vX.Y.Z && git push origin vX.Y.Z` → CI builds, **signs**, and
+  publishes the GitHub Release; the in-app updater and `scripts/install.sh` pick it up.
