@@ -12,6 +12,11 @@ DerivedData/
 Sapat.app/
 *.iconset/
 
+# Release artifacts — built, signed, and published by CI; never committed.
+Sapat-*.zip
+Sapat-*.zip.sig
+Sapat-*.zip.sha256
+
 # Swift Package Manager
 .swiftpm/
 # Package.resolved is committed for reproducible CI builds.
