@@ -19,3 +19,6 @@ Sapat.app/
 # Xcode user state
 xcuserdata/
 *.xcuserstate
+
+# Release signing — the ed25519 PRIVATE key must never be committed (goes to a GitHub secret).
+release-signing-key.txt

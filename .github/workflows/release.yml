@@ -30,11 +30,20 @@ jobs:
         run: |
           ditto -c -k --sequesterRsrc --keepParent Sapat.app "Sapat-${{ steps.version.outputs.version }}.zip"
 
+      # Fail-closed trust chain (F3): sign the zip with the ed25519 key held only in the
+      # SAPAT_SIGNING_KEY secret. Produces Sapat-X.zip.sig (verified in-app) + .sha256.
+      - name: Sign artifact
+        env:
+          SAPAT_SIGNING_KEY: ${{ secrets.SAPAT_SIGNING_KEY }}
+        run: swift scripts/sign-release.swift "Sapat-${{ steps.version.outputs.version }}.zip"
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             "Sapat-${{ steps.version.outputs.version }}.zip" \
+            "Sapat-${{ steps.version.outputs.version }}.zip.sig" \
+            "Sapat-${{ steps.version.outputs.version }}.zip.sha256" \
             --title "Šapat ${GITHUB_REF_NAME}" \
             --generate-notes
